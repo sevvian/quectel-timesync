@@ -28,8 +28,8 @@ endef
 
 define Package/quectel-timesync/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config
-	$(CP) ./files/quectel-timesync.config $(1)/etc/config/quectel-timesync
-	$(INSTALL_BIN) ./files/quectel-timesync.init $(1)/etc/init.d/quectel-timesync	
+	$(INSTALL_CONF) ./files/etc/config/quectel-timesync $(1)/etc/config/quectel-timesync
+	$(INSTALL_BIN) ./files/etc/init.d/quectel-timesync $(1)/etc/init.d/quectel-timesync
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/quectel-timesync $(1)/usr/sbin/quectel-timesync
 endef
 
