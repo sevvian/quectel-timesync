@@ -45,3 +45,35 @@ Minimum: `10`
 ## Supported Modems
 
  - Quectel EC25
+
+Improvement for Luci app and making the timesync program detect vaarying date format and timezones
+
+luci/
+├── Makefile
+├── htdocs
+│   └── luci-static
+│       └── resources
+│           └── view
+│               └── quectel-timesync
+│                   ├── form.js
+│                   └── status.js
+├── po
+│   └── templates
+│       └── quectel-timesync.pot
+└── root
+    ├── etc
+    │   ├── uci-defaults
+    │   │   └── 80_quectel-timesync
+    │   └── config
+    │       └── quectel-timesync   (optional default)
+    └── usr
+        ├── libexec
+        │   └── rpcd
+        │       └── luci.quectel-timesync
+        └── share
+            ├── luci
+            │   └── menu.d
+            │       └── luci-app-quectel-timesync.json
+            └── rpcd
+                └── acl.d
+                    └── luci-app-quectel-timesync.json
