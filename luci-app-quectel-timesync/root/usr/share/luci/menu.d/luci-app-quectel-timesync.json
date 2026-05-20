@@ -1,0 +1,12 @@
+{
+    "admin/services/quectel-timesync": {
+        "title": "Quectel Time Sync",
+        "action": {
+            "type": "view",
+            "path": "quectel-timesync/form"
+        },
+        "depends": {
+            "acl": ["luci-app-quectel-timesync"]
+        }
+    }
+}
