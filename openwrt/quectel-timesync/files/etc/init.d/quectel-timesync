@@ -1,0 +1,26 @@
+#!/bin/sh /etc/rc.common
+START=99
+USE_PROCD=1
+
+PROG=/usr/sbin/quectel-timesync
+
+validate_section() {
+   uci_validate_section quectel-timesync main \
+        'enabled:bool:0' \
+        'path:string' \
+        'interval:uinteger:3600'
+}
+
+start_service() {
+   validate_section || return 1
+   [ "$enabled" = "1" ] || return 1
+
+   if [ -z "$path" ]; then
+       logger -t quectel-timesync "ERROR: 'path' not set in /etc/config/quectel-timesync"
+       return 1
+   fi
+
+   procd_open_instance
+   procd_set_param command $PROG -d "$interval" -p "$path"
+   procd_close_instance
+}
