@@ -1,0 +1,10 @@
+{
+    "luci-app-quectel-timesync": {
+        "read": {
+            "uci": ["quectel-timesync"]
+        },
+        "write": {
+            "uci": ["quectel-timesync"]
+        }
+    }
+}
