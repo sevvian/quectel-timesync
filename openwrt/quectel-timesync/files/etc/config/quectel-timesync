@@ -1,0 +1,4 @@
+config 'quectel-timesync' 'main'
+	option enabled '0'
+	option path ''
+	option interval '3600'
