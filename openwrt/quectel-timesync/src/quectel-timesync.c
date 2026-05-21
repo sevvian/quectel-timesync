@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
-#define _DEFAULT_SOURCE /* Required for timegm() */
+#define _DEFAULT_SOURCE
 
 #include <stdio.h>
 #include <fcntl.h>
@@ -21,7 +21,7 @@ int debug = 0;
 
 /* 
  * Configures the serial port for RAW mode.
- * Crucial for avoiding timeouts caused by Linux terminal processing.
+ * Crucial for avoiding timeouts on embedded Linux systems.
  */
 int configure_serial_port(int fd) {
     struct termios tty;
@@ -37,7 +37,6 @@ int configure_serial_port(int fd) {
     tty.c_cflag &= ~CSIZE;
     tty.c_cflag |= CS8;
 
-    /* Non-blocking: return immediately if no data */
     tty.c_cc[VMIN]  = 0;
     tty.c_cc[VTIME] = 1;
 
@@ -74,7 +73,7 @@ int read_response(int fd, const char *target, char *buf, int buf_size) {
             case 0: // Looking for '+'
                 if (input_char == '+') { state = 1; prefix_ptr = prefix_buf; }
                 break;
-            case 1: // Capturing prefix until ':'
+            case 1: // Capturing prefix
                 if (input_char == ':') {
                     *prefix_ptr = '\0';
                     state = (strcmp(prefix_buf, target) == 0) ? 2 : 0;
@@ -82,13 +81,11 @@ int read_response(int fd, const char *target, char *buf, int buf_size) {
                     *prefix_ptr++ = input_char;
                 }
                 break;
-            case 2: // Consume space after colon
+            case 2: // Space after colon
                 if (input_char == ' ') state = 3;
-                else if (input_char != '\r' && input_char != '\n') {
-                    state = 3; *ptr++ = input_char; // No space, start content
-                }
+                else if (input_char > 32) { state = 3; *ptr++ = input_char; }
                 break;
-            case 3: // Capturing content until newline
+            case 3: // Content
                 if (input_char == '\r' || input_char == '\n') {
                     if (ptr > buf) { *ptr = '\0'; return 0; }
                 } else if (ptr - buf < buf_size - 1) {
@@ -101,16 +98,17 @@ int read_response(int fd, const char *target, char *buf, int buf_size) {
 }
 
 /*
- * Cascading Parser: 
- * Corrects Local Time to UTC using the 15-minute timezone quarters.
+ * Final Production Parser:
+ * Quectel RM521F-GL returns UTC time in the first part of the string.
+ * We use that directly to set the system clock.
  */
 int parse_and_set_system_time(const char *res) {
-    int yr, mon, day, hr, min, sec, tz_q, dst = 0;
+    int yr, mon, day, hr, min, sec, tz_q, dst;
     char sign;
     struct tm tm = {0};
     struct timeval tv;
 
-    /* Try multiple formats (Quotes/No Quotes, DST/No DST) */
+    /* Cascading sscanf to handle quotes and various field lengths */
     if (sscanf(res, " \"%d/%d/%d,%d:%d:%d%c%d,%d\"", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q, &dst) < 8 &&
         sscanf(res, " \"%d/%d/%d,%d:%d:%d%c%d\"", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q) < 8 &&
         sscanf(res, "%d/%d/%d,%d:%d:%d%c%d,%d", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q, &dst) < 8 &&
@@ -119,7 +117,7 @@ int parse_and_set_system_time(const char *res) {
     }
 
     if (yr < 100) yr += 2000;
-    if (yr < 2024) return -2; // Network time not yet acquired
+    if (yr < 2024) return -2; // Ignore if modem hasn't synced with tower yet
 
     tm.tm_year = yr - 1900;
     tm.tm_mon  = mon - 1;
@@ -129,25 +127,21 @@ int parse_and_set_system_time(const char *res) {
     tm.tm_sec  = sec;
     tm.tm_isdst = -1;
 
+    /* Treat the modem timestamp as UTC Truth */
     time_t epoch = timegm(&tm);
     if (epoch == (time_t)-1) return -1;
-
-    /* Offset math: UTC = Local - Offset */
-    int offset_seconds = tz_q * 15 * 60;
-    if (sign == '-') epoch += offset_seconds;
-    else             epoch -= offset_seconds;
 
     tv.tv_sec = epoch;
     tv.tv_usec = 0;
 
     if (settimeofday(&tv, NULL) < 0) return -1;
 
-    /* ImmortalWrt Fix: Update file timestamp so time persists better across reboots */
+    /* OpenWrt/ImmortalWrt: ensure time persists via config timestamp */
     system("touch /etc/config/system 2>/dev/null");
 
     if (debug) {
-        printf("Sync Successful. Mode: No-RTC (RAM Only)\n");
-        printf("UTC Time Set: %s", asctime(gmtime(&epoch)));
+        printf("Sync Successful. Source: %s\n", res);
+        printf("UTC set to: %s", asctime(gmtime(&epoch)));
     }
 
     return 0;
@@ -176,30 +170,21 @@ int main(int argc, char *argv[]) {
     while (1) {
         fd = open_serial_port(port_path);
         if (fd >= 0) {
-            /* 1. Flush old echos */
             tcflush(fd, TCIOFLUSH);
-
-            /* 2. Disable echo (ATE0) */
             write(fd, "ATE0\r\n", 6);
             usleep(WRITE_WAIT_TIMEOUT);
             tcflush(fd, TCIFLUSH);
 
-            /* 3. Query Time */
             write(fd, "AT+QLTS=1\r\n", 11);
 
             if (read_response(fd, "QLTS", buf, sizeof(buf)) == 0) {
                 int res = parse_and_set_system_time(buf);
-                if (res == -2) {
-                    if (debug) fprintf(stderr, "Modem has no network sync yet.\n");
-                } else if (res < 0) {
-                    if (debug) fprintf(stderr, "Failed to parse/set time: %s\n", buf);
+                if (debug) {
+                    if (res == -2) fprintf(stderr, "Waiting for modem network sync...\n");
+                    else if (res < 0) fprintf(stderr, "Parse error on: %s\n", buf);
                 }
-            } else {
-                if (debug) fprintf(stderr, "No response from modem.\n");
             }
             close(fd);
-        } else {
-            if (debug) perror("Serial open failed");
         }
 
         if (daemon_interval < 10) break;
