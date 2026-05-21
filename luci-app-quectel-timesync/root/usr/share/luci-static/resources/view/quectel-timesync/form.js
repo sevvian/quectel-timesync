@@ -7,7 +7,7 @@ return L.view.extend({
         var m = new form.Map('quectel-timesync', _('Quectel Time Sync'),
             _('Configure automatic time synchronization from Quectel modem.'));
 
-        var s = m.section(form.TypedSection, 'main', _('General Settings'));
+        var s = m.section(form.TypedSection, 'quectel-timesync', _('General Settings'));
         s.anonymous = true;
 
         var o;
