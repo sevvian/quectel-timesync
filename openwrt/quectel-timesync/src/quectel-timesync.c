@@ -9,11 +9,10 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
-#include <sys/ioctl.h>
 
 #define READ_WAIT_TIMEOUT 	(1000)
 #define WRITE_WAIT_TIMEOUT	(READ_WAIT_TIMEOUT * 10)
-#define RESPONSE_TIMEOUT	(20)   /* generous timeout for network reply */
+#define RESPONSE_TIMEOUT	(10)
 
 int debug = 0;
 
@@ -22,29 +21,6 @@ int open_serial_port(const char* port_name)
 	int fd = open(port_name, O_RDWR | O_NOCTTY | O_NDELAY);
 	if (fd == -1) {
 		perror("open_serial_port: Unable to open port");
-		return -1;
-	}
-
-	struct termios options;
-	tcgetattr(fd, &options);
-	cfsetispeed(&options, B115200);
-	cfsetospeed(&options, B115200);
-	options.c_cflag &= ~PARENB;
-	options.c_cflag &= ~CSTOPB;
-	options.c_cflag &= ~CSIZE;
-	options.c_cflag |= CS8;
-	options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-	options.c_iflag &= ~(IXON | IXOFF | IXANY);
-	options.c_oflag &= ~OPOST;
-	options.c_cflag &= ~CRTSCTS;
-	tcsetattr(fd, TCSANOW, &options);
-	tcflush(fd, TCIOFLUSH);
-
-	/* Request exclusive access – fail if port is already open by another process */
-	int excl = 1;
-	if (ioctl(fd, TIOCEXCL, &excl) < 0) {
-		perror("TIOCEXCL");
-		close(fd);
 		return -1;
 	}
 
@@ -58,30 +34,27 @@ int write_command(int fd, const char* command)
 		perror("write_command: Unable to write command");
 		return -1;
 	}
-	tcdrain(fd);                     /* wait until all data is sent */
-	usleep(WRITE_WAIT_TIMEOUT);      /* let modem process the command */
+
+	usleep(WRITE_WAIT_TIMEOUT);
+
 	return 0;
 }
 
-/*
- * Original, proven state-machine reader that extracts the line containing
- * "+QLTS:" (or any given prefix). It does NOT rely on newline characters,
- * which makes it immune to line-ending variations.
- */
+enum read_state {
+	READ_STATE_IDLE = 0,
+	READ_STATE_PREFIX,
+	READ_STATE_SEP_SPACE,
+	READ_STATE_CONTENT,
+};
+
 int read_response(int fd, const char *response, char *buf, int buf_size)
 {
-	enum read_state {
-		READ_STATE_IDLE = 0,
-		READ_STATE_PREFIX,
-		READ_STATE_SEP_SPACE,
-		READ_STATE_CONTENT,
-	};
 	enum read_state state;
 	char prefix_buf[32];
 	char input_char;
 	char *ptr, *prefix_ptr = NULL;
 	time_t start_time, current_time;
-
+	
 	start_time = time(NULL);
 	state = READ_STATE_IDLE;
 	ptr = buf;
@@ -89,8 +62,7 @@ int read_response(int fd, const char *response, char *buf, int buf_size)
 	while (1) {
 		current_time = time(NULL);
 		if (current_time - start_time > RESPONSE_TIMEOUT) {
-			if (debug)
-				fprintf(stderr, "read_response: Timeout\n");
+			fprintf(stderr, "read_response: Timeout\n");
 			return -1;
 		}
 
@@ -101,52 +73,51 @@ int read_response(int fd, const char *response, char *buf, int buf_size)
 		}
 
 		switch (state) {
-		case READ_STATE_IDLE:
-			if (input_char == '+') {
-				state = READ_STATE_PREFIX;
-				prefix_ptr = prefix_buf;
-			}
-			break;
-		case READ_STATE_PREFIX:
-			if (input_char == ':') {
-				/* Check the collected prefix against expected */
-				if (prefix_ptr - prefix_buf != strlen(response)) {
-					state = READ_STATE_IDLE;
-					break;
+			case READ_STATE_IDLE:
+				if (input_char == '+') {
+					state = READ_STATE_PREFIX;
+					prefix_ptr = prefix_buf;
 				}
-				if (strncmp(prefix_buf, response, strlen(response)) != 0) {
-					state = READ_STATE_IDLE;
-					break;
+				break;
+			case READ_STATE_PREFIX:
+				if (input_char == ':') {
+					if (prefix_ptr - prefix_buf != strlen(response)) {
+						state = READ_STATE_IDLE;
+						break;
+					}
+
+					if (strncmp(prefix_buf, response, strlen(response)) != 0) {
+						state = READ_STATE_IDLE;
+						break;
+					}
+
+					state = READ_STATE_SEP_SPACE;
+				} else {
+					if (prefix_ptr - prefix_buf < (int)sizeof(prefix_buf) - 1)
+						*prefix_ptr++ = input_char;
+					else
+						state = READ_STATE_IDLE;
 				}
-				state = READ_STATE_SEP_SPACE;
-			} else {
-				if (prefix_ptr - prefix_buf < (int)sizeof(prefix_buf) - 1)
-					*prefix_ptr++ = input_char;
-				else
-					state = READ_STATE_IDLE;  /* overflow, restart */
-			}
-			break;
-		case READ_STATE_SEP_SPACE:
-			if (input_char == ' ') {
-				state = READ_STATE_CONTENT;
-			} else {
-				state = READ_STATE_IDLE;
-			}
-			break;
-		case READ_STATE_CONTENT:
-			if (input_char == '\n' || input_char == '\r') {
-				*ptr = '\0';
-				/* Trim any trailing carriage return left in the buffer */
-				if (ptr > buf && *(ptr-1) == '\r')
-					*(ptr-1) = '\0';
-				return ptr - buf;
-			} else {
-				if (ptr - buf < buf_size - 1)
-					*ptr++ = input_char;
-				else
-					break;  /* buffer full, discard extra */
-			}
-			break;
+				break;
+			case READ_STATE_SEP_SPACE:
+				if (input_char == ' ') {
+					state = READ_STATE_CONTENT;
+				} else {
+					state = READ_STATE_IDLE;
+				}
+				break;
+			case READ_STATE_CONTENT:
+				if (input_char == '\n' || input_char == '\r') {
+					*ptr = '\0';
+					/* Trim any trailing carriage return left in buffer */
+					if (ptr > buf && *(ptr-1) == '\r')
+						*(ptr-1) = '\0';
+					return ptr - buf;
+				} else {
+					if (ptr - buf < buf_size - 1)
+						*ptr++ = input_char;
+				}
+				break;
 		}
 	}
 }
@@ -235,7 +206,7 @@ int perform_timesync(int serial_fd)
 	write_command(serial_fd, "ATE0\r\n");
 	write_command(serial_fd, "AT+QLTS=1\r\n");
 
-	/* Use the proven state-machine reader that searches for "+QLTS:" */
+	/* Use the proven state-machine reader that extracts the "+QLTS:" line */
 	if (read_response(serial_fd, "QLTS", buf, sizeof(buf)) < 0) {
 		fprintf(stderr, "Unable to read response\n");
 		return -1;
@@ -246,8 +217,7 @@ int perform_timesync(int serial_fd)
 
 	/*
 	 * The buffer now contains the content after the "+QLTS: " prefix.
-	 * The original code left the quotes and date as-is. Our parser
-	 * handles quotes and no quotes. So we can pass buf directly.
+	 * Pass it directly to our flexible parser.
 	 */
 	if (parse_response(buf, &utc_tm) != 0) {
 		fprintf(stderr, "Invalid response: %s\n", buf);
@@ -272,18 +242,18 @@ int main(int argc, char *argv[])
 
 	while ((c = getopt (argc, argv, "d:p:v")) != -1) {
 		switch (c) {
-		case 'd':
-			daemon_interval = atoi(optarg);
-			break;
-		case 'v':
-			debug = 1;
-			break;
-		case 'p':
-			serial_path = optarg;
-			break;
-		default:
-			print_usage(argv[0]);
-			return -1;
+			case 'd':
+				daemon_interval = atoi(optarg);
+				break;
+			case 'v':
+				debug = 1;
+				break;
+			case 'p':
+				serial_path = optarg;
+				break;
+			default:
+				print_usage(argv[0]);
+				return -1;
 		}
 	}
 
@@ -310,7 +280,7 @@ int main(int argc, char *argv[])
 
 		if (!daemon_interval)
 			return ret;
-
+		
 		sleep(daemon_interval);
 	}
 
