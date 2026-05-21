@@ -1,29 +1,29 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=quectel-timesync
+PKG_VERSION:=1.0.0
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
-PKG_VERSION:=$(shell git show -s --format=%cd --date=short)
-PKG_RELEASE:=1
-
-PKG_FILE_DEPENDS:=$(CURDIR)/../..
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
 
-define Build/Prepare
-	mkdir -p $(PKG_BUILD_DIR)
-	ln -s $(CURDIR)/../../.git $(PKG_BUILD_DIR)/.git
-	cd $(PKG_BUILD_DIR) && git checkout .
-endef
-
 define Package/quectel-timesync
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=TOol for acquiring time from Quectel cellular modems
+  TITLE:=Tool for acquiring time from Quectel cellular modems
 endef
 
 define Package/quectel-timesync/conffiles
 /etc/config/quectel-timesync
+endef
+
+# --- Override Prepare to copy source WITHOUT git ---
+# CMakeLists.txt is at repo root; we copy both src/ and CMakeLists.txt
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+	$(CP) ./CMakeLists.txt $(PKG_BUILD_DIR)/
+	$(CP) ./src/* $(PKG_BUILD_DIR)/
 endef
 
 define Package/quectel-timesync/install
