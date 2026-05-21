@@ -195,7 +195,15 @@ int perform_timesync(int serial_fd)
     if (debug)
         fprintf(stdout, "Read from serial: %s\n", buf);
 
-    if (parse_response(buf, &utc_tm) != 0) {
+    /* Strip the leading "+QLTS:" (and any following space) if present */
+    char *value = buf;
+    if (strncasecmp(buf, "+QLTS:", 6) == 0) {
+        value = buf + 6;
+        while (*value == ' ' || *value == '\t')
+            value++;
+    }
+
+    if (parse_response(value, &utc_tm) != 0) {
         fprintf(stderr, "Invalid response: %s\n", buf);
         return -1;
     }
