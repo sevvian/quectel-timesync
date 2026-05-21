@@ -2,7 +2,7 @@
 'require form';
 'require uci';
 
-return view.extend({
+return L.view.extend({
     render: function() {
         var m = new form.Map('quectel-timesync', _('Quectel Time Sync'),
             _('Configure automatic time synchronization from Quectel modem.'));
