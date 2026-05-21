@@ -7,23 +7,21 @@ return L.view.extend({
         var m = new form.Map('quectel-timesync', _('Quectel Time Sync'),
             _('Configure automatic time synchronization from Quectel modem.'));
 
-        var s = m.section(form.TypedSection, 'quectel-timesync', _('General Settings'));
-        s.anonymous = true;
-
+        // CHANGED: Use NamedSection instead of TypedSection to keep it consistent with init.d
+        var s = m.section(form.NamedSection, 'main', 'quectel-timesync', _('General Settings'));
+        
         var o;
-        o = s.option(form.Flag, 'enabled', _('Enable'),
-            _('Enable the time sync daemon.'));
+        o = s.option(form.Flag, 'enabled', _('Enable'));
         o.default = '0';
+        o.rmempty = false; // Keep the value in config even if 0
 
-        o = s.option(form.Value, 'path', _('AT Serial Port'),
-            _('Exact serial port for AT commands, e.g., /dev/ttyUSB2. This is required.'));
+        o = s.option(form.Value, 'path', _('AT Serial Port'), _('e.g. /dev/ttyUSB2'));
         o.rmempty = false;
-        o.placeholder = '/dev/ttyUSB2';
+        o.datatype = 'string';
 
-        o = s.option(form.Value, 'interval', _('Sync Interval (seconds)'),
-            _('How often to query the network time. Minimum 10 seconds.'));
+        o = s.option(form.Value, 'interval', _('Sync Interval (seconds)'));
         o.datatype = 'uinteger';
-        o.placeholder = '3600';
+        o.default = '3600';
 
         return m.render();
     }
