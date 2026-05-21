@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
-#define _DEFAULT_SOURCE /* For timegm() */
+#define _DEFAULT_SOURCE /* Required for timegm() */
 
 #include <stdio.h>
 #include <fcntl.h>
@@ -12,25 +12,20 @@
 #include <time.h>
 #include <sys/time.h>
 #include <getopt.h>
-#include <errno.h>
 
-#define READ_WAIT_TIMEOUT   (1000)      /* 1ms loop wait */
-#define WRITE_WAIT_TIMEOUT  (100000)    /* 100ms between commands */
-#define RESPONSE_TIMEOUT    (10)        /* 10 second total timeout */
+#define READ_WAIT_TIMEOUT   (1000)      /* 1ms loop sleep */
+#define WRITE_WAIT_TIMEOUT  (100000)    /* 100ms command delay */
+#define RESPONSE_TIMEOUT    (10)        /* 10 second serial timeout */
 
 int debug = 0;
 
 /* 
- * Configures serial port to Raw Mode.
- * This prevents the OS from waiting for newlines and allows
- * byte-by-byte processing without interference.
+ * Configures the serial port for RAW mode.
+ * Crucial for avoiding timeouts caused by Linux terminal processing.
  */
 int configure_serial_port(int fd) {
     struct termios tty;
-    if (tcgetattr(fd, &tty) != 0) {
-        perror("tcgetattr");
-        return -1;
-    }
+    if (tcgetattr(fd, &tty) != 0) return -1;
 
     cfmakeraw(&tty);
     cfsetospeed(&tty, B115200);
@@ -42,260 +37,173 @@ int configure_serial_port(int fd) {
     tty.c_cflag &= ~CSIZE;
     tty.c_cflag |= CS8;
 
-    /* Non-blocking read with 0.1s inter-character timeout */
+    /* Non-blocking: return immediately if no data */
     tty.c_cc[VMIN]  = 0;
     tty.c_cc[VTIME] = 1;
 
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        perror("tcsetattr");
-        return -1;
-    }
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) return -1;
     return 0;
 }
 
 int open_serial_port(const char* port_name) {
     int fd = open(port_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd == -1) {
-        perror("open_serial_port: Unable to open port");
-        return -1;
-    }
-    
+    if (fd == -1) return -1;
     if (configure_serial_port(fd) < 0) {
         close(fd);
         return -1;
     }
-    
     return fd;
 }
 
-int write_command(int fd, const char* command) {
-    int len = write(fd, command, strlen(command));
-    if (len < 0) {
-        perror("write_command: Unable to write");
-        return -1;
-    }
-    tcdrain(fd);
-    return 0;
-}
-
-enum read_state {
-    STATE_IDLE = 0,
-    STATE_PREFIX,
-    STATE_SEP_SPACE,
-    STATE_CONTENT,
-};
-
-/*
- * State-machine reader. Correctly handles:
- * 1. Modem echoes (AT+QLTS=1)
- * 2. Leading/Trailing spaces
- * 3. Carriage returns
+/* 
+ * State machine reader: 
+ * Filters out command echoes and extracts data after '+PREFIX: '
  */
-int read_response(int fd, const char *target_prefix, char *buf, int buf_size) {
-    enum read_state state = STATE_IDLE;
-    char prefix_buf[32];
-    char input_char;
-    char *ptr = buf;
-    char *prefix_ptr = NULL;
-    time_t start_time = time(NULL);
+int read_response(int fd, const char *target, char *buf, int buf_size) {
+    char input_char, prefix_buf[32], *prefix_ptr = prefix_buf, *ptr = buf;
+    int state = 0; // 0:IDLE, 1:PREFIX, 2:SEP, 3:CONTENT
+    time_t start = time(NULL);
 
-    while (1) {
-        if (time(NULL) - start_time > RESPONSE_TIMEOUT) {
-            return -1;
-        }
-
-        int len = read(fd, &input_char, 1);
-        if (len <= 0) {
+    while (time(NULL) - start < RESPONSE_TIMEOUT) {
+        if (read(fd, &input_char, 1) <= 0) {
             usleep(READ_WAIT_TIMEOUT);
             continue;
         }
 
         switch (state) {
-            case STATE_IDLE:
-                if (input_char == '+') {
-                    state = STATE_PREFIX;
-                    prefix_ptr = prefix_buf;
-                }
+            case 0: // Looking for '+'
+                if (input_char == '+') { state = 1; prefix_ptr = prefix_buf; }
                 break;
-
-            case STATE_PREFIX:
+            case 1: // Capturing prefix until ':'
                 if (input_char == ':') {
                     *prefix_ptr = '\0';
-                    if (strcmp(prefix_buf, target_prefix) == 0) {
-                        state = STATE_SEP_SPACE;
-                    } else {
-                        state = STATE_IDLE; /* Not the prefix we wanted */
-                    }
-                } else {
-                    if (prefix_ptr - prefix_buf < (int)sizeof(prefix_buf) - 1)
-                        *prefix_ptr++ = input_char;
+                    state = (strcmp(prefix_buf, target) == 0) ? 2 : 0;
+                } else if (prefix_ptr - prefix_buf < 31) {
+                    *prefix_ptr++ = input_char;
                 }
                 break;
-
-            case STATE_SEP_SPACE:
-                if (input_char == ' ') {
-                    state = STATE_CONTENT;
-                } else if (input_char != '\r' && input_char != '\n') {
-                    state = STATE_CONTENT;
-                    goto capture; /* Jump to content if modem skipped space */
+            case 2: // Consume space after colon
+                if (input_char == ' ') state = 3;
+                else if (input_char != '\r' && input_char != '\n') {
+                    state = 3; *ptr++ = input_char; // No space, start content
                 }
                 break;
-
-            case STATE_CONTENT:
-            capture:
-                if (input_char == '\n' || input_char == '\r') {
-                    if (ptr > buf) {
-                        *ptr = '\0';
-                        return ptr - buf;
-                    }
-                } else {
-                    if (ptr - buf < buf_size - 1)
-                        *ptr++ = input_char;
+            case 3: // Capturing content until newline
+                if (input_char == '\r' || input_char == '\n') {
+                    if (ptr > buf) { *ptr = '\0'; return 0; }
+                } else if (ptr - buf < buf_size - 1) {
+                    *ptr++ = input_char;
                 }
                 break;
         }
     }
-}
-
-/*
- * Universal Parser: Handles Timezone Quarters and DST flags.
- * Calculates true UTC by applying the offset to Local Time.
- */
-int parse_quectel_time(const char *response, struct tm *utc_tm) {
-    int yr, mon, day, hr, min, sec, tz_q, dst;
-    char sign;
-    int matched = 0;
-
-    /* Pattern 1: "2026/05/21,03:17:14-28,1" (Quotes, TZ, DST) */
-    matched = sscanf(response, "\"%d/%d/%d,%d:%d:%d%c%d,%d\"", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q, &dst);
-    
-    /* Pattern 2: 2026/05/21,03:17:14-28,1 (No quotes) */
-    if (matched < 8)
-        matched = sscanf(response, "%d/%d/%d,%d:%d:%d%c%d,%d", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q, &dst);
-
-    /* Pattern 3: "2026/05/21,03:17:14-28" (Quotes, TZ, no DST) */
-    if (matched < 8)
-        matched = sscanf(response, "\"%d/%d/%d,%d:%d:%d%c%d\"", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q);
-
-    /* Pattern 4: 2026/05/21,03:17:14-28 (No quotes, TZ, no DST) */
-    if (matched < 8)
-        matched = sscanf(response, "%d/%d/%d,%d:%d:%d%c%d", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q);
-
-    if (matched < 8) return -1;
-
-    if (yr < 100) yr += 2000;
-    if (yr < 2024) {
-        fprintf(stderr, "Error: Modem reports date before 2024 (No network sync yet).\n");
-        return -1;
-    }
-
-    struct tm local_tm = {0};
-    local_tm.tm_year = yr - 1900;
-    local_tm.tm_mon  = mon - 1;
-    local_tm.tm_mday = day;
-    local_tm.tm_hour = hr;
-    local_tm.tm_min  = min;
-    local_tm.tm_sec  = sec;
-    local_tm.tm_isdst = -1;
-
-    /* Convert to linear epoch */
-    time_t epoch = timegm(&local_tm);
-    if (epoch == (time_t)-1) return -1;
-
-    /* Apply TZ offset (1 quarter = 15 minutes) */
-    int offset_sec = tz_q * 15 * 60;
-    if (sign == '-') epoch += offset_sec; /* Subtracting a negative = adding */
-    else             epoch -= offset_sec;
-
-    if (gmtime_r(&epoch, utc_tm) == NULL) return -1;
-
-    return 0;
-}
-
-int set_system_time(const struct tm *utc_tm) {
-    struct timeval tv;
-    tv.tv_sec = timegm((struct tm *)utc_tm);
-    tv.tv_usec = 0;
-
-    if (settimeofday(&tv, NULL) < 0) {
-        perror("settimeofday");
-        return -1;
-    }
-    
-    /* Sync hardware RTC (Silent if fails) */
-    if (system("hwclock -w 2>/dev/null") != 0 && debug) {
-        fprintf(stderr, "Warning: hwclock -w failed.\n");
-    }
-    return 0;
-}
-
-int perform_sync(int fd) {
-    char buf[256];
-    struct tm utc_tm;
-
-    /* 1. Flush echos/garbage */
-    tcflush(fd, TCIOFLUSH);
-
-    /* 2. Disable Echo */
-    write_command(fd, "ATE0\r\n");
-    usleep(WRITE_WAIT_TIMEOUT);
-    tcflush(fd, TCIFLUSH);
-
-    /* 3. Query Time */
-    write_command(fd, "AT+QLTS=1\r\n");
-
-    if (read_response(fd, "QLTS", buf, sizeof(buf)) < 0) {
-        fprintf(stderr, "Error: No +QLTS response from modem (check network reg).\n");
-        return -1;
-    }
-
-    if (debug) printf("Raw Data: %s\n", buf);
-
-    if (parse_quectel_time(buf, &utc_tm) != 0) {
-        fprintf(stderr, "Error: Failed to parse: %s\n", buf);
-        return -1;
-    }
-
-    if (set_system_time(&utc_tm) == 0) {
-        char time_str[64];
-        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S UTC", &utc_tm);
-        printf("Success: System time set to %s\n", time_str);
-        return 0;
-    }
-
     return -1;
 }
 
+/*
+ * Cascading Parser: 
+ * Corrects Local Time to UTC using the 15-minute timezone quarters.
+ */
+int parse_and_set_system_time(const char *res) {
+    int yr, mon, day, hr, min, sec, tz_q, dst = 0;
+    char sign;
+    struct tm tm = {0};
+    struct timeval tv;
+
+    /* Try multiple formats (Quotes/No Quotes, DST/No DST) */
+    if (sscanf(res, " \"%d/%d/%d,%d:%d:%d%c%d,%d\"", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q, &dst) < 8 &&
+        sscanf(res, " \"%d/%d/%d,%d:%d:%d%c%d\"", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q) < 8 &&
+        sscanf(res, "%d/%d/%d,%d:%d:%d%c%d,%d", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q, &dst) < 8 &&
+        sscanf(res, "%d/%d/%d,%d:%d:%d%c%d", &yr, &mon, &day, &hr, &min, &sec, &sign, &tz_q) < 8) {
+        return -1;
+    }
+
+    if (yr < 100) yr += 2000;
+    if (yr < 2024) return -2; // Network time not yet acquired
+
+    tm.tm_year = yr - 1900;
+    tm.tm_mon  = mon - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hr;
+    tm.tm_min  = min;
+    tm.tm_sec  = sec;
+    tm.tm_isdst = -1;
+
+    time_t epoch = timegm(&tm);
+    if (epoch == (time_t)-1) return -1;
+
+    /* Offset math: UTC = Local - Offset */
+    int offset_seconds = tz_q * 15 * 60;
+    if (sign == '-') epoch += offset_seconds;
+    else             epoch -= offset_seconds;
+
+    tv.tv_sec = epoch;
+    tv.tv_usec = 0;
+
+    if (settimeofday(&tv, NULL) < 0) return -1;
+
+    /* ImmortalWrt Fix: Update file timestamp so time persists better across reboots */
+    system("touch /etc/config/system 2>/dev/null");
+
+    if (debug) {
+        printf("Sync Successful. Mode: No-RTC (RAM Only)\n");
+        printf("UTC Time Set: %s", asctime(gmtime(&epoch)));
+    }
+
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
-    const char *port = NULL;
-    int interval = 0;
-    int c;
+    char *port_path = NULL;
+    int daemon_interval = 0;
+    int c, fd;
+    char buf[256];
 
     while ((c = getopt(argc, argv, "d:p:v")) != -1) {
         switch (c) {
-            case 'd': interval = atoi(optarg); break;
-            case 'p': port = optarg; break;
+            case 'd': daemon_interval = atoi(optarg); break;
+            case 'p': port_path = optarg; break;
             case 'v': debug = 1; break;
-            default:  break;
+            default:  return -1;
         }
     }
 
-    if (!port) {
+    if (!port_path) {
         fprintf(stderr, "Usage: %s -p <port> [-d <interval>] [-v]\n", argv[0]);
         return -1;
     }
 
     while (1) {
-        int fd = open_serial_port(port);
+        fd = open_serial_port(port_path);
         if (fd >= 0) {
-            perform_sync(fd);
+            /* 1. Flush old echos */
+            tcflush(fd, TCIOFLUSH);
+
+            /* 2. Disable echo (ATE0) */
+            write(fd, "ATE0\r\n", 6);
+            usleep(WRITE_WAIT_TIMEOUT);
+            tcflush(fd, TCIFLUSH);
+
+            /* 3. Query Time */
+            write(fd, "AT+QLTS=1\r\n", 11);
+
+            if (read_response(fd, "QLTS", buf, sizeof(buf)) == 0) {
+                int res = parse_and_set_system_time(buf);
+                if (res == -2) {
+                    if (debug) fprintf(stderr, "Modem has no network sync yet.\n");
+                } else if (res < 0) {
+                    if (debug) fprintf(stderr, "Failed to parse/set time: %s\n", buf);
+                }
+            } else {
+                if (debug) fprintf(stderr, "No response from modem.\n");
+            }
             close(fd);
         } else {
-            fprintf(stderr, "Could not open %s\n", port);
+            if (debug) perror("Serial open failed");
         }
 
-        if (interval < 10) break;
-        sleep(interval);
+        if (daemon_interval < 10) break;
+        sleep(daemon_interval);
     }
 
     return 0;
