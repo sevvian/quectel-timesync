@@ -1,18 +1,16 @@
 'use strict';
 'require form';
 'require uci';
-'require view';
 
 return view.extend({
     render: function() {
-        var m, s, o;
-
-        m = new form.Map('quectel-timesync', _('Quectel Time Sync'),
+        var m = new form.Map('quectel-timesync', _('Quectel Time Sync'),
             _('Configure automatic time synchronization from Quectel modem.'));
 
-        s = m.section(form.NamedSection, 'main', 'quectel-timesync',
-            _('General Settings'));
+        var s = m.section(form.TypedSection, 'main', _('General Settings'));
+        s.anonymous = true;
 
+        var o;
         o = s.option(form.Flag, 'enabled', _('Enable'),
             _('Enable the time sync daemon.'));
         o.default = '0';
